@@ -10,14 +10,17 @@
 #
 
 import os
+import re
 import torch
 from random import randint
+from utils.proj_utils import project_xyz_to_pixels
 from utils.loss_utils import l1_loss, ssim
 from lpipsPyTorch import lpips
 from gaussian_renderer import render, network_gui, count_render
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
+from utils.edge_utils import build_edge_distance_map
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -36,12 +39,11 @@ import random
 import copy
 import gc
 from os import makedirs
-from prune import prune_list, calculate_v_imp_score
+from prune import prune_list, calculate_v_imp_score, prune_list_edge_weighted
 import torchvision
 from torch.optim.lr_scheduler import ExponentialLR
 import csv
 from utils.logger_utils import training_report, prepare_output_and_logger
-
 
 to_tensor = (
     lambda x: x.to("cuda")
@@ -50,6 +52,37 @@ to_tensor = (
 )
 img2mse = lambda x, y: torch.mean((x - y) ** 2)
 mse2psnr = lambda x: -10.0 * torch.log(x) / torch.log(to_tensor([10.0]))
+
+
+def valid_render_pkg(pkg):
+    if not isinstance(pkg, dict):
+        return False, "not a dict"
+
+    required = ["render", "viewspace_points", "visibility_filter", "radii"]
+    missing = [k for k in required if k not in pkg]
+    if missing:
+        return False, f"missing keys: {missing}"
+
+    # 값이 None이거나 타입/디바이스가 이상한지 체크
+    if pkg["render"] is None:
+        return False, "render is None"
+    if pkg["viewspace_points"] is None or pkg["radii"] is None:
+        return False, "viewspace_points or radii is None"
+    if pkg["visibility_filter"] is None:
+        return False, "visibility_filter is None"
+
+    # 선택: 텐서 타입/디바이스/shape 간단 검증
+    try:
+        vsp = pkg["viewspace_points"]
+        vf  = pkg["visibility_filter"]
+        r   = pkg["radii"]
+        # visibility_filter와 radii 길이 일치 여부
+        if hasattr(vf, "shape") and hasattr(r, "shape") and vf.shape != r.shape:
+            return False, f"shape mismatch vf={vf.shape}, radii={r.shape}"
+    except Exception as e:
+        return False, f"type/device check failed: {e}"
+
+    return True, "ok"
 
 
 def training(
@@ -81,9 +114,13 @@ def training(
     else:
         raise ValueError("A checkpoint file or a pointcloud is required to proceed.")
 
-        
-        
+    # build edge distance maps for all training views
+    edge_dmaps = {}  # {cam_id: torch(H,W) on CUDA}
+    for cam in scene.getTrainCameras():
+        d = build_edge_distance_map(cam.original_image)  # (H,W) CPU
+        edge_dmaps[id(cam)] = d.cuda(non_blocking=True)
 
+    
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -271,14 +308,40 @@ def training(
 
                 ic("After prune iteration, number of gaussians: " + str(len(gaussians.get_xyz)))
 
-            # if iteration in args.densify_iteration:
-            #     gaussians.max_radii2D[visibility_filter] = torch.max(
-            #         gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
-            #     )
-            #     gaussians.add_densification_stats(
-            #         viewspace_point_tensor, visibility_filter
-            #     )
-            #     gaussians.densify(opt.densify_grad_threshold, scene.cameras_extent)
+            DENSIFY_PERIOD = 500
+            if iteration < args.densify_iteration[-1] and iteration >= args.densify_iteration[0] and iteration % DENSIFY_PERIOD == 0:
+                gaussians.max_radii2D[visibility_filter] = torch.max(
+                    gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+                )
+                gaussians.add_densification_stats(
+                    viewspace_point_tensor, visibility_filter
+                )
+                
+                # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
+                uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
+                dmap = edge_dmaps[id(viewpoint_cam)]
+                d = torch.full((gaussians.get_xyz.shape[0],), 1e6, device='cuda')
+                ui = uv[inb,0].long(); vi = uv[inb,1].long()
+                d[inb] = dmap[vi, ui]
+                # 엣지 가까울수록 1에 가깝게: exp(-d/tau)
+                edge_mask = torch.exp(-d/0.1)   # tau=0.1 예시 (장면에 맞춰 튜닝)
+                # hard mask 원하면 edge_mask = (d <= dist_thresh).float()
+
+                size_threshold = (
+                    20 if iteration > opt.opacity_reset_interval else None
+                )
+
+
+                gaussians.densify_and_prune_edge_aware(
+                    opt.densify_grad_threshold,  # max_grad
+                    0.005,             # min_opacity (옵션 파라미터 이름 확인 필요)
+                    scene.cameras_extent,        # extent
+                    size_threshold,         # max_screen_size (옵션 파라미터 이름 확인 필요)
+                    edge_mask,                   # edge_mask_float
+                    max_opacity_prune_non_edge=0.5     # 엣지 prune 임계값 (튜닝 가능) # 0.1
+                )
+
+                # gaussians.densify(opt.densify_grad_threshold, scene.cameras_extent)
             
                 ic("after")
                 ic(gaussians.get_xyz.shape)
@@ -319,7 +382,7 @@ if __name__ == "__main__":
         "--prune_type", type=str, default="important_score"
     )  # k_mean, farther_point_sample, important_score
     parser.add_argument("--v_pow", type=float, default=0.1)
-    parser.add_argument("--densify_iteration", nargs="+", type=int, default=[-1])
+    parser.add_argument("--densify_iteration", nargs="+", type=int, default=[30_500, 33_000]) # 33_500
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -327,7 +390,6 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)

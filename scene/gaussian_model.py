@@ -786,3 +786,80 @@ class GaussianModel:
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
         )
         self.denom[update_filter] += 1
+
+    def densify_and_prune_edge_aware(self, max_grad, min_opacity, extent, max_screen_size, edge_mask_float, max_opacity_prune_non_edge=0.1):
+    #     """
+    #     엣지(edge) 기반으로 Densify와 Prune을 동시에 수행하는 함수입니다.
+
+    #     - 1. Densification (엣지 영역):
+    #     'edge_mask_float' (0~1)를 그래디언트에 곱합니다.
+    #     값이 1에 가까운 (엣지에 가까운) 가우시안만 densify 대상이 됩니다.
+        
+    #     - 2. Pruning (엣지에서 먼 영역 + 표준 영역):
+    #     (a) 표준 Pruning: min_opacity, max_screen_size 기준으로 불필요한 가우시안을 제거합니다.
+    #     (b) 엣지 Pruning: 'edge_mask_float' 값이 'edge_prune_threshold' (예: 0.1)보다 
+    #                     낮은 (엣지에서 먼) 가우시안을 '추가로' 제거합니다.
+
+    #     결과: 엣지 영역은 세밀해지고, 엣지에서 먼 영역은 적극적으로 Pruning되어
+    #         가우시안 개수 증가를 억제하고 최적화합니다.
+    #     """
+
+        # --- 1. 엣지 인식 Densification 로직 ---
+        
+        N_old = self.get_xyz.shape[0]
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        edge_mask = edge_mask_float.squeeze().clamp(0.0, 1.0) 
+        
+        if edge_mask.shape[0] != N_old:
+            print(f"Warning: edge_mask shape mismatch. Skipping edge logic.")
+            densify_grads = grads
+        else:
+            # 엣지 영역만 Densify (기존과 동일)
+            if grads.shape == (grads.shape[0],):
+                grads_squeezed = grads
+            else:
+                grads_squeezed = grads.squeeze()
+            densify_grads = (grads_squeezed * edge_mask).unsqueeze(-1)
+
+        self.densify_and_clone(densify_grads, max_grad, extent)
+        self.densify_and_split(densify_grads, max_grad, extent)
+
+        # --- 2. Pruning 로직 (표준 + 적응형 엣지) ---
+        
+        N_new = self.get_xyz.shape[0]
+        num_new_points = N_new - N_old
+
+        # --- [핵심 수정] ---
+        # (a) 적응형 불투명도 임계값(Adaptive Opacity Threshold) 계산
+        
+        # N_old 크기의 엣지 마스크를 N_new 크기로 "패딩"합니다.
+        # (새로 생긴 점들은 엣지에서 생겼으므로 edge_mask = 1.0으로 간주)
+        if num_new_points > 0:
+            new_points_mask = torch.ones(num_new_points, device=self.get_xyz.device)
+            edge_mask = torch.cat([edge_mask, new_points_mask], dim=0)
+
+        # 엣지에서는 min_opacity, 평평한 곳에서는 max_opacity_prune_non_edge
+        # (N_new,) 크기의 텐서가 생성됨
+        adaptive_opacity_threshold = (
+            (1.0 - edge_mask) * max_opacity_prune_non_edge +  # 평평한 영역
+            edge_mask * min_opacity                          # 엣지 영역
+        )
+        
+        # (b) 표준 Prune 마스크 계산
+        # (기준을 min_opacity가 아닌 adaptive_opacity_threshold로 변경)
+        standard_prune_mask = (self.get_opacity.squeeze() < adaptive_opacity_threshold)
+        
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            standard_prune_mask = torch.logical_or(
+                torch.logical_or(standard_prune_mask, big_points_vs), big_points_ws
+            )
+        
+        # (c) [삭제] 엣지 프루닝 로직이 (b)에 통합되었으므로 삭제
+        # final_prune_mask = torch.logical_or(standard_prune_mask, edge_prune_mask)
+        
+        self.prune_points(standard_prune_mask) # 최종 마스크 적용
+        torch.cuda.empty_cache()
+

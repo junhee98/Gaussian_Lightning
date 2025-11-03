@@ -14,22 +14,16 @@ port=6041
 # Only one dataset specified here, but you could run multiple
 declare -a run_args=(
     "bicycle"
-    # "bonsai"
-    # "counter"
-    # "kitchen"
-    # "room"
-    # "stump"
-    # "garden"
+    "bonsai"
+    "counter"
+    "flowers"
+    "garden"
+    "kitchen"
+    "room"
+    "stump"
+    "treehill"
     # "train"
     # "truck"
-    # "chair"
-    # "drums"
-    # "ficus"
-    # "hotdog"
-    # "lego"
-    # "mic"
-    # "materials"
-    # "ship"
   )
 
 
@@ -65,26 +59,27 @@ for arg in "${run_args[@]}"; do
       # Wait for an available GPU
       while true; do
         gpu_id=$(get_available_gpu)
+        gpu_id=1
         if [[ -n $gpu_id ]]; then
           echo "GPU $gpu_id is available. Starting prune_finetune.py with dataset '$arg', prune_percent '$prune_percent', prune_type '$prune_type', prune_decay '$prune_decay', and v_pow '$vp' on port $port"
           
-          CUDA_VISIBLE_DEVICES=$gpu_id nohup python prune_finetune.py \
-            -s "PATH/TO/DATASET/$arg" \
-            -m "OUTPUT/PATH/${arg}_${prune_percent}" \
+          CUDA_VISIBLE_DEVICES=$gpu_id python prune_finetune.py \
+            -s "/root/dev/junhee/ai_framework/datasets/mip_nerf_360/$arg" \
+            -m "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours/pruned" \
             --eval \
             --port $port \
-            --start_checkpoint "PATH/TO/CHECKPOINT/$arg/chkpnt30000.pth" \
+            --start_checkpoint "/root/dev/junhee/ai_framework/gaussian-splatting/output/$arg/chkpnt30000.pth" \
             --iteration 35000 \
             --prune_percent $prune_percent \
             --prune_type $prune_type \
             --prune_decay $prune_decay \
             --position_lr_max_steps 35000 \
-            --v_pow $vp > "logs_prune/${arg}${prune_percent}prunned.log" 2>&1 &
+            --v_pow $vp > "logs_ours/${arg}_pruned.log" 2>&1
 
           # Increment the port number for the next run
           ((port++))
           # Allow some time for the process to initialize and potentially use GPU memory
-          sleep 60
+          # sleep 60
           break
         else
           echo "No GPU available at the moment. Retrying in 1 minute."

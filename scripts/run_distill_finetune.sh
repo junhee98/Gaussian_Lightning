@@ -16,12 +16,14 @@ declare -a run_args=(
     "bicycle"
     "bonsai"
     "counter"
+    "flowers"
+    "garden"
     "kitchen"
     "room"
     "stump"
-    "garden"
-     "train"
-    "truck"
+    "treehill"
+    #  "train"
+    # "truck"
 )
 
 
@@ -36,25 +38,26 @@ for arg in "${run_args[@]}"; do
     # Wait for an available GPU
     while true; do
       gpu_id=$(get_available_gpu)
+      gpu_id=1  # Forcing to use GPU 1 for testing purpose
       if [[ -n $gpu_id ]]; then
         echo "GPU $gpu_id is available. Starting distill_train.py with dataset '$arg' and options '$view' on port $port"
-        CUDA_VISIBLE_DEVICES=$gpu_id nohup python distill_train.py \
-          -s "PATH/TO/DATASET/$arg" \
-          -m "OUTPUT/PATH/${arg}_${prune_percent}" \
-          --start_checkpoint "PATH/TO/CHECKPOINT/$arg/chkpnt30000.pth" \
+        CUDA_VISIBLE_DEVICES=$gpu_id python distill_train.py \
+          -s "/root/dev/junhee/ai_framework/datasets/mip_nerf_360/$arg" \
+          -m "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours/distiled" \
+          --start_checkpoint "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours/pruned/chkpnt35000.pth" \
           --iteration 40000 \
           --eval \
-          --teacher_model "PATH/TO/TEACHER_CHECKPOINT/${arg}/chkpnt30000.pth" \
+          --teacher_model "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours/pruned/chkpnt35000.pth" \
           --new_max_sh 2 \
           --position_lr_max_steps 40000 \
           --enable_covariance \
           $view \
-          --port $port > "logs/distill_${arg}${view}.log" 2>&1 &
+          --port $port > "logs_ours/${arg}${view}_distilled.log" 2>&1
 
         # Increment the port number for the next run
         ((port++))
         # Allow some time for the process to initialize and potentially use GPU memory
-        sleep 60
+        # sleep 60
         break
       else
         echo "No GPU available at the moment. Retrying in 1 minute."

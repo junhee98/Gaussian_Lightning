@@ -65,15 +65,16 @@ for arg in "${run_args[@]}"; do
       # Wait for an available GPU
       while true; do
         gpu_id=$(get_available_gpu)
+        gpu_id=1
         if [[ -n $gpu_id ]]; then
           echo "GPU $gpu_id is available. Starting prune_finetune.py with dataset '$arg', prune_percent '$prune_percent', prune_type '$prune_type', prune_decay '$prune_decay', and v_pow '$vp' on port $port"
           
           CUDA_VISIBLE_DEVICES=$gpu_id python prune_finetune.py \
-            -s "PATH/TO/DATASET/$arg" \
-            -m "OUTPUT/PATH/${arg}_${prune_percent}" \
+            -s "/root/dev/junhee/ai_framework/datasets/mip_nerf_360/$arg" \
+            -m "/root/dev/junhee/ai_framework/LightGaussian/${arg}_pruned" \
             --eval \
             --port $port \
-            --start_pointcloud "PATH/TO/CHECKPOINT/$arg/point_cloud/iteration_30000/point_cloud.ply" \
+            --start_pointcloud "/root/dev/junhee/ai_framework/gaussian-splatting/output/$arg/point_cloud/iteration_30000/point_cloud.ply" \
             --iteration 5000 \
             --test_iterations 5000 \
             --save_iterations 5000 \

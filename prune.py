@@ -16,6 +16,7 @@ from gaussian_renderer import render, count_render
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
+from utils.proj_utils import project_xyz_to_pixels
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -108,6 +109,8 @@ from collections import defaultdict
 #     mask = np.zeros(s, dtype=bool)
 #     mask[points_to_prune] = True
 #     return mask
+
+
 
 def calculate_v_imp_score(gaussians, imp_list, v_pow):
     """
