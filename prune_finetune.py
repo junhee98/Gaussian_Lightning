@@ -27,6 +27,8 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import numpy as np
+import torchvision.utils as vutils
+from matplotlib import pyplot as plt
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -39,11 +41,12 @@ import random
 import copy
 import gc
 from os import makedirs
-from prune import prune_list, calculate_v_imp_score, prune_list_edge_weighted
+from prune import prune_list, calculate_v_imp_score
 import torchvision
 from torch.optim.lr_scheduler import ExponentialLR
 import csv
 from utils.logger_utils import training_report, prepare_output_and_logger
+from PIL import Image
 
 to_tensor = (
     lambda x: x.to("cuda")
@@ -120,6 +123,27 @@ def training(
         d = build_edge_distance_map(cam.original_image)  # (H,W) CPU
         edge_dmaps[id(cam)] = d.cuda(non_blocking=True)
 
+    # ################## For Edge map debug ##################
+    # edge_map_debug_dir = os.path.join(dataset.model_path, "edge_map_debug")
+    # os.makedirs(edge_map_debug_dir, exist_ok=True)
+    # print(f"[DEBUG] Saving edge map visualizations to: {edge_map_debug_dir}")
+
+    # edge_dmaps = {}
+    # for cam in scene.getTrainCameras():
+    #     d = build_edge_distance_map(cam.original_image)  # (H,W) CPU
+    #     edge_dmaps[id(cam)] = d.cuda(non_blocking=True)
+
+    #     base_name = os.path.splitext(os.path.basename(cam.image_name))[0]
+
+    #     # 거리 맵 (Distance Map) 시각화 (0=검정색, 멀수록=흰색)
+    #     d_np = d.numpy()
+    #     print(f"Min: {d_np.min()}, Max: {d_np.max()}")
+    #     # [0, max_dist] 범위를 [0, 255] 범위로 정규화
+    #     d_img_array = (d_np * 255.0).astype(np.uint8)
+    #     img_d = Image.fromarray(d_img_array, 'L') # 'L' = 흑백
+    #     save_path_d = os.path.join(edge_map_debug_dir, f"distmap_{base_name}.png")
+    #     img_d.save(save_path_d)
+    # #########################################################
     
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -276,7 +300,7 @@ def training(
                         (args.prune_decay**i) * args.prune_percent,
                         gaussians.get_opacity.detach(),
                     )
-                # TODO(release different pruning method)
+                # TODO(release different pruning method) --> This is from LightGaussian
                 # elif args.prune_type == "HDBSCAN":
                 #     masks = HDBSCAN_prune(gaussians, imp_list, (args.prune_decay**i)*args.prune_percent)
                 #     gaussians.prune_points(masks)
@@ -310,6 +334,19 @@ def training(
 
             DENSIFY_PERIOD = 500
             if iteration < args.densify_iteration[-1] and iteration >= args.densify_iteration[0] and iteration % DENSIFY_PERIOD == 0:
+                
+                # ############ For Debugging (Which view selected?) #######################
+                # debug_dir = os.path.join(dataset.model_path, "densify_trigger_debug")
+                # os.makedirs(debug_dir, exist_ok=True)
+
+                # iteration_str = str(iteration).zfill(7)
+                # base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+                # save_path = os.path.join(debug_dir, f"{iteration_str}_{base_name}.png")
+
+                # vutils.save_image(viewpoint_cam.original_image, save_path)
+                # print(f"\n[DEBUG] Saved densify trigger image to: {save_path}")
+                # ##################################################
+
                 gaussians.max_radii2D[visibility_filter] = torch.max(
                     gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
                 )
@@ -319,13 +356,81 @@ def training(
                 
                 # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
                 uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
+
+                # ############## For projection debug ##############
+                # debug_dir = os.path.join(dataset.model_path, "projection_test_debug")
+                # os.makedirs(debug_dir, exist_ok=True)
+
+                # iteration_str = str(iteration).zfill(7)
+                # base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+                # save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
+                # save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
+
+                # H = viewpoint_cam.image_height
+                # W = viewpoint_cam.image_width
+
+                # # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
+                # projection_image = np.zeros((H, W), dtype=np.uint8)
+
+                # # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
+                # #    이것이 "프러스텀 컬링"을 검증합니다.
+                # visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
+
+                # # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
+                # projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
+
+                # # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
+                # img_pil = Image.fromarray(projection_image, 'L')
+                # img_pil.save(save_path_proj)
+
+                # # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
+                # vutils.save_image(viewpoint_cam.original_image, save_path_orig)
+
+                # print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
+                # ##################################################
+
+
                 dmap = edge_dmaps[id(viewpoint_cam)]
                 d = torch.full((gaussians.get_xyz.shape[0],), 1e6, device='cuda')
-                ui = uv[inb,0].long(); vi = uv[inb,1].long()
+                ui = uv[inb,0].long()
+                vi = uv[inb,1].long()
                 d[inb] = dmap[vi, ui]
                 # 엣지 가까울수록 1에 가깝게: exp(-d/tau)
                 edge_mask = torch.exp(-d/0.1)   # tau=0.1 예시 (장면에 맞춰 튜닝)
-                # hard mask 원하면 edge_mask = (d <= dist_thresh).float()
+
+                # ############## For edge mask debug ##############
+                # debug_dir = os.path.join(dataset.model_path, "projected_edge_mask_debug")
+                # os.makedirs(debug_dir, exist_ok=True)
+                
+                # iteration_str = str(iteration).zfill(7)
+                # base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+                # save_path_heatmap = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projected_heatmap.png")
+
+                # H = viewpoint_cam.image_height
+                # W = viewpoint_cam.image_width
+
+                # # (a) 2D 캔버스 생성
+                # projected_mask_2d = torch.zeros((H, W), dtype=torch.float32, device='cpu')
+
+                # # (b) 뷰 안에 보이는(inb) 가우시안들의 2D 좌표와 엣지 가중치 추출
+                # valid_uv = uv[inb].cpu()
+                # valid_edge_mask = edge_mask[inb].cpu() # (k,)
+
+                # valid_y = valid_uv[:, 1].long()
+                # valid_x = valid_uv[:, 0].long()
+
+                # # (c) 캔버스에 엣지 가중치 값을 "뿌리기"
+                # projected_mask_2d[valid_y, valid_x] = valid_edge_mask
+
+                # # (d) 히트맵으로 저장 ('hot' 컬러맵: 0=검정, 1=밝은 흰색)
+                # plt.figure(figsize=(W/100, H/100), dpi=100)
+                # plt.imshow(projected_mask_2d.numpy(), cmap='hot', vmin=0, vmax=1)
+                # plt.axis('off')
+                # plt.tight_layout()
+                # plt.savefig(save_path_heatmap, bbox_inches='tight', pad_inches=0)
+                # plt.close()
+                # ##################################################
+
 
                 size_threshold = (
                     20 if iteration > opt.opacity_reset_interval else None
