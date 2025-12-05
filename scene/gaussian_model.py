@@ -9,9 +9,11 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+from networkx import radius
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.edge_utils import get_otsu_threshold
 from torch import nn
 import os
 from utils.system_utils import mkdir_p
@@ -22,6 +24,9 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from icecream import ic
 from vectree.utils import load_vqgaussian, write_ply_data
+
+from torch_cluster import knn
+from torch_scatter import scatter_mean
 
 
 class GaussianModel:
@@ -781,11 +786,229 @@ class GaussianModel:
         prune_mask = (import_score <= value_nth_percentile).squeeze()
         self.prune_points(prune_mask)
 
+    # def prune_gaussians_edgemap(self, threshold, import_score: list):
+    #     ic(import_score.shape)
+    #     prune_mask = (import_score > threshold).squeeze()
+    #     self.prune_points(prune_mask)
+
+    def prune_gaussians_edgemap(self, percent, import_score: list):
+        ic(import_score.shape)
+        sorted_tensor, _ = torch.sort(import_score, dim=0)
+        index_nth_percentile = int(percent * (sorted_tensor.shape[0] - 1))
+        value_nth_percentile = sorted_tensor[index_nth_percentile]
+        prune_mask = (import_score > value_nth_percentile).squeeze()
+        self.prune_points(prune_mask)
+
+    # def prune_gaussians_edgemap(self, percent, import_score: list):
+    #     ic(import_score.shape)
+    #     threshold = get_otsu_threshold(import_score)
+    #     prune_mask = (import_score > threshold).squeeze()
+    #     self.prune_points(prune_mask)
+
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
         )
         self.denom[update_filter] += 1
+
+    def densify_and_split_with_blend(self, grads, grad_threshold, scene_extent, N=2, k=4, blend_alpha=0.1):
+        n_init_points = self.get_xyz.shape[0]
+        # Extract points that satisfy the gradient condition
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[: grads.shape[0]] = grads.squeeze()
+        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values
+            > self.percent_dense * scene_extent,
+        )
+
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        means = torch.zeros((stds.size(0), 3), device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
+            selected_pts_mask
+        ].repeat(N, 1)
+        
+        # --- [신규 로직 시작] ---
+        
+        # 1. k-NN 탐색을 위한 원본 데이터 (데이터베이스)
+        #    (clone()으로 현재 시점의 데이터를 고정합니다)
+        all_xyz = self.get_xyz.clone().detach()
+        all_features_dc = self._features_dc.clone().detach()
+        all_features_rest = self._features_rest.clone().detach() # << [추가]
+        all_opacity = self._opacity.clone().detach()             # << [추가]
+        
+        # 2. 새로 생성된 가우시안의 기본 속성 (부모 속성 복제)
+        new_scaling = self.scaling_inverse_activation(
+            self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+        )
+        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
+        
+        # 부모(원본) 속성 저장
+        new_features_dc_parent = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest_parent = self._features_rest[selected_pts_mask].repeat(N, 1, 1) # << [추가]
+        new_opacity_parent = self._opacity[selected_pts_mask].repeat(N, 1)
+
+        num_new_points = new_xyz.shape[0]
+
+        if num_new_points > 0:
+            # 3. k-NN 탐색: all_xyz에서 new_xyz의 k개 이웃을 찾음
+            # edge_index[0] = new_xyz의 인덱스 (0 ~ num_new_points-1)
+            # edge_index[1] = all_xyz의 인덱스 (이웃)
+            edge_index = knn(all_xyz, new_xyz, k=k)
+            query_indices, neighbor_indices = edge_index[0], edge_index[1]
+
+            # 4. 이웃 속성 집계
+            # [num_new_points * k, C, 1]
+            neighbor_features_dc = all_features_dc[neighbor_indices]
+            mean_neighbor_features_dc = scatter_mean(
+                neighbor_features_dc, query_indices, dim=0, dim_size=num_new_points
+            )
+
+            # 4. 이웃 속성 집계 (Rest) << [추가]
+            neighbor_features_rest = all_features_rest[neighbor_indices]
+            mean_neighbor_features_rest = scatter_mean(
+                neighbor_features_rest, query_indices, dim=0, dim_size=num_new_points
+            )
+
+            # 4. 이웃 속성 집계 (Opacity) << [추가]
+            neighbor_opacity = all_opacity[neighbor_indices]
+            mean_neighbor_opacity = scatter_mean(
+                neighbor_opacity, query_indices, dim=0, dim_size=num_new_points
+            )
+            
+            # scatter_mean: query_indices를 기준으로 그룹화하여 평균 계산
+            # [num_new_points, C, 1]
+            mean_neighbor_features_dc = scatter_mean(
+                neighbor_features_dc, query_indices, dim=0, dim_size=num_new_points
+            )
+
+            # 5. 블렌딩
+            # (1-a) * 부모 속성 + (a) * 이웃 평균 속성
+            new_features_dc = (
+                (1.0 - blend_alpha) * new_features_dc_parent
+                + blend_alpha * mean_neighbor_features_dc
+            )
+            new_features_rest = (  # << [추가]
+                (1.0 - blend_alpha) * new_features_rest_parent
+                + blend_alpha * mean_neighbor_features_rest
+            )
+            new_opacity = (  # << [추가]
+                (1.0 - blend_alpha) * new_opacity_parent
+                + blend_alpha * mean_neighbor_opacity
+            )
+        else:
+            # 분할할 포인트가 없으면 그냥 원본 사용
+            new_features_dc = new_features_dc_parent
+            new_features_rest = new_features_rest_parent # << [추가]
+            new_opacity = new_opacity_parent             # << [추가]
+        
+        # --- [신규 로직 종료] ---
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc, # 블렌딩된 f_dc 사용
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation,
+        )
+
+        prune_filter = torch.cat(
+            (
+                selected_pts_mask,
+                torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
+            )
+        )
+        self.prune_points(prune_filter)
+
+    def densify_and_clone_with_blend(self, grads, grad_threshold, scene_extent, k=4, blend_alpha=0.1):
+        # Extract points that satisfy the gradient condition
+        selected_pts_mask = torch.where(
+            torch.norm(grads, dim=-1) >= grad_threshold, True, False
+        )
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values
+            <= self.percent_dense * scene_extent,
+        )
+
+        # --- [신규 로직 시작 (Split과 거의 동일)] ---
+
+        # 1. k-NN 탐색을 위한 원본 데이터 (데이터베이스)
+        all_xyz = self.get_xyz.clone().detach()
+        all_features_dc = self._features_dc.clone().detach()
+        all_features_rest = self._features_rest.clone().detach()
+        all_opacity = self._opacity.clone().detach()
+        
+        # 2. 새로 생성될 가우시안의 기본 속성 (부모 속성 복제)
+        #    (Clone이므로 .repeat(N, 1)이 없습니다)
+        new_xyz = self._xyz[selected_pts_mask] # < [차이점] xyz는 부모와 동일
+        new_scaling = self._scaling[selected_pts_mask] # < [차이점] 스케일도 부모와 동일
+        new_rotation = self._rotation[selected_pts_mask] # < [차이점] 로테이션도 동일
+
+        # 부모(원본) 속성 저장
+        new_features_dc_parent = self._features_dc[selected_pts_mask]
+        new_features_rest_parent = self._features_rest[selected_pts_mask]
+        new_opacity_parent = self._opacity[selected_pts_mask]
+        
+        num_new_points = new_xyz.shape[0]
+
+        if num_new_points > 0:
+            # 3. k-NN 탐색: all_xyz에서 new_xyz(부모 위치)의 k개 이웃을 찾음
+            edge_index = knn(all_xyz, new_xyz, k=k)
+            query_indices, neighbor_indices = edge_index[0], edge_index[1]
+
+            # 4. 이웃 속성 집계 (DC)
+            neighbor_features_dc = all_features_dc[neighbor_indices]
+            mean_neighbor_features_dc = scatter_mean(
+                neighbor_features_dc, query_indices, dim=0, dim_size=num_new_points
+            )
+            
+            # 4. 이웃 속성 집계 (Rest)
+            neighbor_features_rest = all_features_rest[neighbor_indices]
+            mean_neighbor_features_rest = scatter_mean(
+                neighbor_features_rest, query_indices, dim=0, dim_size=num_new_points
+            )
+
+            # 4. 이웃 속성 집계 (Opacity)
+            neighbor_opacity = all_opacity[neighbor_indices]
+            mean_neighbor_opacity = scatter_mean(
+                neighbor_opacity, query_indices, dim=0, dim_size=num_new_points
+            )
+
+            # 5. 블렌딩
+            new_features_dc = (
+                (1.0 - blend_alpha) * new_features_dc_parent
+                + blend_alpha * mean_neighbor_features_dc
+            )
+            new_features_rest = (
+                (1.0 - blend_alpha) * new_features_rest_parent
+                + blend_alpha * mean_neighbor_features_rest
+            )
+            new_opacity = (
+                (1.0 - blend_alpha) * new_opacity_parent
+                + blend_alpha * mean_neighbor_opacity
+            )
+        else:
+            # 복제할 포인트가 없으면 그냥 원본 사용
+            new_features_dc = new_features_dc_parent
+            new_features_rest = new_features_rest_parent
+            new_opacity = new_opacity_parent
+        
+        # --- [신규 로직 종료] ---
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation,
+        )
+
 
     def densify_and_prune_edge_aware(self, max_grad, min_opacity, extent, max_screen_size, edge_mask_float, max_opacity_prune_non_edge=0.1):
     #     """
@@ -824,6 +1047,13 @@ class GaussianModel:
 
         self.densify_and_clone(densify_grads, max_grad, extent)
         self.densify_and_split(densify_grads, max_grad, extent)
+        # self.densify_and_clone_with_blend(
+        #     densify_grads, max_grad, extent, k=16, blend_alpha=0.8
+        # )
+
+        # self.densify_and_split_with_blend(
+        #     densify_grads, max_grad, extent, k=16, blend_alpha=0.8
+        # )
 
         # --- 2. Pruning 로직 (표준 + 적응형 엣지) ---
         
@@ -861,5 +1091,20 @@ class GaussianModel:
         # final_prune_mask = torch.logical_or(standard_prune_mask, edge_prune_mask)
         
         self.prune_points(standard_prune_mask) # 최종 마스크 적용
+
+        ## Scale이 큰 가우시안들은 split
+        # scales = self.get_scaling.max(dim=1).values
+        # large_scale_threshold = scales.mean() * 1.5
+
+        # large_scale_mask = scales > large_scale_threshold
+
+        # current_xyz = self.get_xyz
+        # N_current = current_xyz.shape[0]
+        # pseudo_grads = torch.zeros((N_current, 1), device=current_xyz.device)
+        # pseudo_grads[large_scale_mask] = max_grad + 1.0  # 강제로 densify 유도
+
+
+        # self.densify_and_split(pseudo_grads, max_grad, extent)
+
         torch.cuda.empty_cache()
 

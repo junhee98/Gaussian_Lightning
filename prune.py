@@ -20,6 +20,7 @@ from utils.proj_utils import project_xyz_to_pixels
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
+from utils.proj_utils import project_xyz_to_pixels
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.graphics_utils import getWorld2View2
@@ -29,6 +30,8 @@ import copy
 import gc
 import numpy as np
 from collections import defaultdict
+import torchvision.utils as vutils
+from PIL import Image
 
 # from cuml.cluster import HDBSCAN
 
@@ -158,3 +161,79 @@ def prune_list(gaussians, scene, pipe, background):
         imp_list += important_score
         gc.collect()
     return gaussian_list, imp_list
+
+def prune_edge_base(gaussians, scene, dataset, edge_dmaps, save_path):
+    print(f"\n[Global Pruning] Starting global scan over {len(scene.getTrainCameras())} views...")
+    
+    n_points = gaussians.get_xyz.shape[0]
+    global_importance_scores = torch.full((n_points,), 0.0, device="cuda")
+    viewpoint_stack = scene.getTrainCameras().copy()
+
+    for iteration in tqdm(range(len(viewpoint_stack))):
+        # Pick a random Camera
+        viewpoint_cam = viewpoint_stack.pop()
+        
+        # project points to pixels
+        uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
+
+        # load edge dmap for the current viewpoint
+        edge_map = edge_dmaps[id(viewpoint_cam)]
+
+        # found point in visible area
+        visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
+
+        # extract edge distance map values
+        current_dist = edge_map[visible_uv[:, 1], visible_uv[:, 0]]  # (k, )
+
+        # global_importance_scores[inb] = torch.min(global_importance_scores[inb], current_dist)
+        global_importance_scores[inb] += current_dist
+
+        ############## For projection debug ############## --> Before
+        debug_dir = os.path.join(dataset.model_path, save_path)
+        os.makedirs(debug_dir, exist_ok=True)
+
+        iteration_str = str(iteration).zfill(7)
+        base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+        save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
+        save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
+
+        H = viewpoint_cam.image_height
+        W = viewpoint_cam.image_width
+
+        # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
+        projection_image = np.zeros((H, W), dtype=np.uint8)
+
+        # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
+        #    이것이 "프러스텀 컬링"을 검증합니다.
+        visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
+
+        # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
+        projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
+
+        # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
+        img_pil = Image.fromarray(projection_image, 'L')
+        img_pil.save(save_path_proj)
+
+        # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
+        vutils.save_image(viewpoint_cam.original_image, save_path_orig)
+
+        # print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
+        ##################################################
+    
+    print(f"[Debug] Min dist stats: Min={global_importance_scores.min():.4f}, Mean={global_importance_scores.mean():.4f}, Max={global_importance_scores.max():.4f}")
+
+    # global_importance scroes 분포 시각화
+    debug_dir = os.path.join(dataset.model_path)
+    os.makedirs(debug_dir, exist_ok=True)
+    save_path_hist = os.path.join(debug_dir, f"global_importance_histogram.png")
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.hist(global_importance_scores.cpu().numpy(), bins=100, color='blue', alpha=0.7)
+    plt.title('Global Importance Scores Distribution')
+    plt.xlabel('Importance Score')
+    plt.ylabel('Frequency')
+    plt.savefig(save_path_hist)
+    plt.close()
+
+    return global_importance_scores
+

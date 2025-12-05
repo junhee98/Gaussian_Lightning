@@ -14,7 +14,7 @@ import re
 import torch
 from random import randint
 from utils.proj_utils import project_xyz_to_pixels
-from utils.loss_utils import l1_loss, ssim, edge_distance_loss, tv_loss, compute_fft_loss, compute_gradient_loss, WaveletLoss
+from utils.loss_utils import l1_loss, ssim, edge_distance_loss, tv_loss, compute_fft_loss, compute_gradient_loss
 from lpipsPyTorch import lpips
 from gaussian_renderer import render, network_gui, count_render
 import sys
@@ -41,7 +41,7 @@ import random
 import copy
 import gc
 from os import makedirs
-from prune import prune_list, calculate_v_imp_score
+from prune import prune_list, calculate_v_imp_score, prune_edge_base
 import torchvision
 from torch.optim.lr_scheduler import ExponentialLR
 import csv
@@ -255,12 +255,6 @@ def training(
         # loss = loss + 0.05 * compute_gradient_loss(image, gt_image) #compute_fft_loss(image, gt_image)
 
 
-        # if iteration > args.densify_iteration[-1]:
-        #     wavelet_loss_fn = WaveletLoss()
-        #     wavelet_loss = wavelet_loss_fn(image, gt_image)
-        #     loss = (1.0 - opt.lambda_dssim) * wavelet_loss + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-
-
         loss.backward()
 
         iter_end.record()
@@ -311,6 +305,14 @@ def training(
             if iteration in args.prune_iterations:
                 print("Before prune iteration, number of gaussians: " + str(len(gaussians.get_xyz)))
                 i = args.prune_iterations.index(iteration)
+                important_score_edge_base = prune_edge_base(gaussians, scene, dataset, edge_dmaps, save_path="before_prune_edge_base")
+                gaussians.prune_gaussians_edgemap(percent=0.9, import_score=important_score_edge_base) # 살릴 percent
+
+                print("After prune iteration ( Edge Base ), number of gaussians: " + str(len(gaussians.get_xyz)))
+
+                _ = prune_edge_base(gaussians, scene, dataset, edge_dmaps, save_path="after_prune_edge_base") # for debug
+
+                i = args.prune_iterations.index(iteration)
                 gaussian_list, imp_list = prune_list(gaussians, scene, pipe, background)
 
                 if args.prune_type == "important_score":
@@ -322,7 +324,7 @@ def training(
                     v_list = calculate_v_imp_score(gaussians, imp_list, args.v_pow)
                     gaussians.prune_gaussians(
                         (args.prune_decay**i) * args.prune_percent, v_list
-                    )
+                    ) # 없앨 percent
                 elif args.prune_type == "max_v_important_score":
                     v_list = imp_list * torch.max(gaussians.get_scaling, dim=1)[0]
                     gaussians.prune_gaussians(
@@ -369,155 +371,155 @@ def training(
 
                 print("After prune iteration, number of gaussians: " + str(len(gaussians.get_xyz)))
 
-            DENSIFY_PERIOD = 500
-            if iteration <= args.densify_iteration[-1] and iteration >= args.densify_iteration[0] and iteration % DENSIFY_PERIOD == 0:
-                ############ For Debugging (Which view selected?) #######################
-                debug_dir = os.path.join(dataset.model_path, "densify_trigger_debug")
-                os.makedirs(debug_dir, exist_ok=True)
+            # DENSIFY_PERIOD = 500
+            # if iteration <= args.densify_iteration[-1] and iteration >= args.densify_iteration[0] and iteration % DENSIFY_PERIOD == 0:
+            #     ############ For Debugging (Which view selected?) #######################
+            #     debug_dir = os.path.join(dataset.model_path, "densify_trigger_debug")
+            #     os.makedirs(debug_dir, exist_ok=True)
 
-                iteration_str = str(iteration).zfill(7)
-                base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
-                save_path = os.path.join(debug_dir, f"{iteration_str}_{base_name}.png")
+            #     iteration_str = str(iteration).zfill(7)
+            #     base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+            #     save_path = os.path.join(debug_dir, f"{iteration_str}_{base_name}.png")
 
-                vutils.save_image(viewpoint_cam.original_image, save_path)
-                print(f"\n[DEBUG] Saved densify trigger image to: {save_path}")
-                ##################################################
+            #     vutils.save_image(viewpoint_cam.original_image, save_path)
+            #     print(f"\n[DEBUG] Saved densify trigger image to: {save_path}")
+            #     ##################################################
 
-                gaussians.max_radii2D[visibility_filter] = torch.max(
-                    gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
-                )
-                gaussians.add_densification_stats(
-                    viewspace_point_tensor, visibility_filter
-                )
+            #     gaussians.max_radii2D[visibility_filter] = torch.max(
+            #         gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+            #     )
+            #     gaussians.add_densification_stats(
+            #         viewspace_point_tensor, visibility_filter
+            #     )
                 
-                # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
-                uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
+            #     # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
+            #     uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
 
-                ############## For projection debug ############## --> Before
-                debug_dir = os.path.join(dataset.model_path, "projection_test_debug")
-                os.makedirs(debug_dir, exist_ok=True)
+            #     ############## For projection debug ############## --> Before
+            #     debug_dir = os.path.join(dataset.model_path, "projection_test_debug")
+            #     os.makedirs(debug_dir, exist_ok=True)
 
-                iteration_str = str(iteration).zfill(7)
-                base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
-                save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
-                save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
+            #     iteration_str = str(iteration).zfill(7)
+            #     base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+            #     save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
+            #     save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
 
-                H = viewpoint_cam.image_height
-                W = viewpoint_cam.image_width
+            #     H = viewpoint_cam.image_height
+            #     W = viewpoint_cam.image_width
 
-                # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
-                projection_image = np.zeros((H, W), dtype=np.uint8)
+            #     # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
+            #     projection_image = np.zeros((H, W), dtype=np.uint8)
 
-                # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
-                #    이것이 "프러스텀 컬링"을 검증합니다.
-                visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
+            #     # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
+            #     #    이것이 "프러스텀 컬링"을 검증합니다.
+            #     visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
 
-                # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
-                projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
+            #     # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
+            #     projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
 
-                # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
-                img_pil = Image.fromarray(projection_image, 'L')
-                img_pil.save(save_path_proj)
+            #     # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
+            #     img_pil = Image.fromarray(projection_image, 'L')
+            #     img_pil.save(save_path_proj)
 
-                # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
-                vutils.save_image(viewpoint_cam.original_image, save_path_orig)
+            #     # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
+            #     vutils.save_image(viewpoint_cam.original_image, save_path_orig)
 
-                print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
-                ##################################################
+            #     print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
+            #     ##################################################
 
 
-                dmap = edge_dmaps[id(viewpoint_cam)]
-                d = torch.full((gaussians.get_xyz.shape[0],), 1e6, device='cuda')
-                ui = uv[inb,0].long()
-                vi = uv[inb,1].long()
-                d[inb] = dmap[vi, ui]
-                # 엣지 가까울수록 1에 가깝게: exp(-d/tau)
-                # tau = 0.1  # 덴시파이와 동일한 값 사용 (튜닝 가능)
-                # edge_mask = torch.exp(-d/tau)   # tau=0.1 예시 (장면에 맞춰 튜닝)
-                edge_mask = 1.0 - d
+            #     dmap = edge_dmaps[id(viewpoint_cam)]
+            #     d = torch.full((gaussians.get_xyz.shape[0],), 1e6, device='cuda')
+            #     ui = uv[inb,0].long()
+            #     vi = uv[inb,1].long()
+            #     d[inb] = dmap[vi, ui]
+            #     # 엣지 가까울수록 1에 가깝게: exp(-d/tau)
+            #     # tau = 0.1  # 덴시파이와 동일한 값 사용 (튜닝 가능)
+            #     # edge_mask = torch.exp(-d/tau)   # tau=0.1 예시 (장면에 맞춰 튜닝)
+            #     edge_mask = 1.0 - d
 
-                ############## For edge mask debug ##############
-                debug_dir = os.path.join(dataset.model_path, "projected_edge_mask_debug")
-                os.makedirs(debug_dir, exist_ok=True)
+            #     ############## For edge mask debug ##############
+            #     debug_dir = os.path.join(dataset.model_path, "projected_edge_mask_debug")
+            #     os.makedirs(debug_dir, exist_ok=True)
                 
-                iteration_str = str(iteration).zfill(7)
-                base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
-                save_path_heatmap = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projected_heatmap.png")
+            #     iteration_str = str(iteration).zfill(7)
+            #     base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+            #     save_path_heatmap = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projected_heatmap.png")
 
-                H = viewpoint_cam.image_height
-                W = viewpoint_cam.image_width
+            #     H = viewpoint_cam.image_height
+            #     W = viewpoint_cam.image_width
 
-                # (a) 2D 캔버스 생성
-                projected_mask_2d = torch.zeros((H, W), dtype=torch.float32, device='cpu')
+            #     # (a) 2D 캔버스 생성
+            #     projected_mask_2d = torch.zeros((H, W), dtype=torch.float32, device='cpu')
 
-                # (b) 뷰 안에 보이는(inb) 가우시안들의 2D 좌표와 엣지 가중치 추출
-                valid_uv = uv[inb].cpu()
-                valid_edge_mask = edge_mask[inb].cpu() # (k,)
+            #     # (b) 뷰 안에 보이는(inb) 가우시안들의 2D 좌표와 엣지 가중치 추출
+            #     valid_uv = uv[inb].cpu()
+            #     valid_edge_mask = edge_mask[inb].cpu() # (k,)
 
-                valid_y = valid_uv[:, 1].long()
-                valid_x = valid_uv[:, 0].long()
+            #     valid_y = valid_uv[:, 1].long()
+            #     valid_x = valid_uv[:, 0].long()
 
-                # (c) 캔버스에 엣지 가중치 값을 "뿌리기"
-                projected_mask_2d[valid_y, valid_x] = valid_edge_mask
+            #     # (c) 캔버스에 엣지 가중치 값을 "뿌리기"
+            #     projected_mask_2d[valid_y, valid_x] = valid_edge_mask
 
-                # (d) 히트맵으로 저장 ('hot' 컬러맵: 0=검정, 1=밝은 흰색)
-                plt.figure(figsize=(W/100, H/100), dpi=100)
-                plt.imshow(projected_mask_2d.numpy(), cmap='hot', vmin=0, vmax=1)
-                plt.axis('off')
-                plt.tight_layout()
-                plt.savefig(save_path_heatmap, bbox_inches='tight', pad_inches=0)
-                plt.close()
-                ##################################################
-
-
-                size_threshold = (
-                    20 if iteration > opt.opacity_reset_interval else None
-                )
+            #     # (d) 히트맵으로 저장 ('hot' 컬러맵: 0=검정, 1=밝은 흰색)
+            #     plt.figure(figsize=(W/100, H/100), dpi=100)
+            #     plt.imshow(projected_mask_2d.numpy(), cmap='hot', vmin=0, vmax=1)
+            #     plt.axis('off')
+            #     plt.tight_layout()
+            #     plt.savefig(save_path_heatmap, bbox_inches='tight', pad_inches=0)
+            #     plt.close()
+            #     ##################################################
 
 
-                gaussians.densify_and_prune_edge_aware(
-                    opt.densify_grad_threshold,  # max_grad
-                    0.005,             # min_opacity (옵션 파라미터 이름 확인 필요)
-                    scene.cameras_extent,        # extent
-                    size_threshold,         # max_screen_size (옵션 파라미터 이름 확인 필요)
-                    edge_mask,                   # edge_mask_float
-                    max_opacity_prune_non_edge=0.5    # 엣지 prune 임계값 (튜닝 가능) # 0.5
-                )
+            #     size_threshold = (
+            #         20 if iteration > opt.opacity_reset_interval else None
+            #     )
 
-                # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
-                uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
 
-                ############## For projection debug ##############
-                debug_dir = os.path.join(dataset.model_path, "projection_test_debug_after_densify")
-                os.makedirs(debug_dir, exist_ok=True)
+            #     gaussians.densify_and_prune_edge_aware(
+            #         opt.densify_grad_threshold,  # max_grad
+            #         0.005,             # min_opacity (옵션 파라미터 이름 확인 필요)
+            #         scene.cameras_extent,        # extent
+            #         size_threshold,         # max_screen_size (옵션 파라미터 이름 확인 필요)
+            #         edge_mask,                   # edge_mask_float
+            #         max_opacity_prune_non_edge=0.5    # 엣지 prune 임계값 (튜닝 가능) # 0.5
+            #     )
 
-                iteration_str = str(iteration).zfill(7)
-                base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
-                save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
-                save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
+            #     # 현재 뽑은 viewpoint_cam 기준 엣지 마스크 산출
+            #     uv, inb = project_xyz_to_pixels(gaussians.get_xyz, viewpoint_cam)
 
-                H = viewpoint_cam.image_height
-                W = viewpoint_cam.image_width
+            #     ############## For projection debug ##############
+            #     debug_dir = os.path.join(dataset.model_path, "projection_test_debug_after_densify")
+            #     os.makedirs(debug_dir, exist_ok=True)
 
-                # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
-                projection_image = np.zeros((H, W), dtype=np.uint8)
+            #     iteration_str = str(iteration).zfill(7)
+            #     base_name = os.path.splitext(os.path.basename(viewpoint_cam.image_name))[0]
+            #     save_path_proj = os.path.join(debug_dir, f"{iteration_str}_{base_name}_projection.png")
+            #     save_path_orig = os.path.join(debug_dir, f"{iteration_str}_{base_name}_original.png")
 
-                # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
-                #    이것이 "프러스텀 컬링"을 검증합니다.
-                visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
+            #     H = viewpoint_cam.image_height
+            #     W = viewpoint_cam.image_width
 
-                # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
-                projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
+            #     # 1. 검은색 빈 캔버스(이미지)를 만듭니다. (H, W)
+            #     projection_image = np.zeros((H, W), dtype=np.uint8)
 
-                # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
-                img_pil = Image.fromarray(projection_image, 'L')
-                img_pil.save(save_path_proj)
+            #     # 2. 'inb' (in-bounds) 마스크가 True인 가우시안만 필터링합니다.
+            #     #    이것이 "프러스텀 컬링"을 검증합니다.
+            #     visible_uv = uv[inb].cpu().numpy().astype(int) # (k, 2)
 
-                # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
-                vutils.save_image(viewpoint_cam.original_image, save_path_orig)
+            #     # 3. 캔버스의 해당 픽셀을 흰색(255)으로 칠합니다.
+            #     projection_image[visible_uv[:, 1], visible_uv[:, 0]] = 255
 
-                print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
-                ##################################################
+            #     # 4. 투영된 포인트 클라우드 이미지를 저장합니다.
+            #     img_pil = Image.fromarray(projection_image, 'L')
+            #     img_pil.save(save_path_proj)
+
+            #     # 6. 비교를 위해 원본 이미지도 바로 옆에 저장합니다.
+            #     vutils.save_image(viewpoint_cam.original_image, save_path_orig)
+
+            #     print(f"[DEBUG] Saved projection test image to: {save_path_proj}")
+            #     ##################################################
 
 
                 ic("after")
