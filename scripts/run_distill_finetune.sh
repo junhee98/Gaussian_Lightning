@@ -22,8 +22,6 @@ declare -a run_args=(
     "room"
     "stump"
     "treehill"
-    #  "train"
-    # "truck"
 )
 
 
@@ -43,21 +41,18 @@ for arg in "${run_args[@]}"; do
         echo "GPU $gpu_id is available. Starting distill_train.py with dataset '$arg' and options '$view' on port $port"
         CUDA_VISIBLE_DEVICES=$gpu_id python distill_train.py \
           -s "/root/dev/junhee/ai_framework/datasets/mip_nerf_360/$arg" \
-          -m "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours_new_global_prune/distiled" \
-          --start_checkpoint "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours_new_global_prune/pruned/chkpnt35000.pth" \
+          -m "/root/dev/junhee/ai_framework/Gaussian_Lightning/output/${arg}_ours_final_version/distiled" \
+          --start_checkpoint "/root/dev/junhee/ai_framework/Gaussian_Lightning/output/${arg}_ours_final_version/pruned/chkpnt35000.pth" \
           --iteration 40000 \
           --eval \
-          --teacher_model "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours_new_global_prune/pruned/chkpnt35000.pth" \
+          --teacher_model "/root/dev/junhee/ai_framework/Gaussian_Lightning/output/${arg}_ours_final/pruned/chkpnt35000.pth" \
           --new_max_sh 2 \
           --position_lr_max_steps 40000 \
           --enable_covariance \
           $view \
-          --port $port #> "logs_ours_new/${arg}${view}_distilled.log" 2>&1
+          --port $port
 
-        # Increment the port number for the next run
         ((port++))
-        # Allow some time for the process to initialize and potentially use GPU memory
-        # sleep 60
         break
       else
         echo "No GPU available at the moment. Retrying in 1 minute."

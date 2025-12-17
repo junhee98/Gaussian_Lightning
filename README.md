@@ -1,27 +1,4 @@
-# LightGaussian: Unbounded 3D Gaussian Compression with 15x Reduction and 200+ FPS
-
-<p align="center">
-<a href="https://arxiv.org/abs/2311.17245"><img src="https://img.shields.io/badge/Arxiv-2311.17245-B31B1B.svg"></a>
-<a href="https://youtu.be/470hul75bSM"><img src="https://img.shields.io/badge/Video-Youtube-d61c1c.svg"></a>
-<a href="https://lightgaussian.github.io/"><img src="https://img.shields.io/badge/Project-Page-048C3D"></a>
-<a href="https://github.com/VITA-Group/LightGaussian"><img src="https://img.shields.io/github/stars/VITA-Group/LightGaussian"></a>
-</p>
-
-<!-- [Project Page](https://lightgaussian.github.io) | [Video](https://youtu.be/470hul75bSM) | [Paper](https://lightgaussian.github.io/static/paper/LightGaussian_arxiv.pdf) | [Arxiv](https://arxiv.org/abs/2311.17245) -->
-<div>
-<img src="https://lightgaussian.github.io/static/images/teaser.png" height="250"/>
-</div>
-
-## User Guidance
-#### Gaussian Prune Ratio, Vector Quantization Ratio vs. FPS, SSIM
-<div>
-<img src="https://raw.githubusercontent.com/VITA-Group/LightGaussian/main/static/prune_ratio_vs_ssim.svg" height="250"/>
-</div>
-
-#### Mild Compression Ratio, with Minimum Accuracy Degradation
-<div>
-<img src="https://github.com/VITA-Group/LightGaussian/blob/main/static/table5.png?raw=true" height="300"/>
-</div>
+# Compressive 3D Gaussian Splatting via Frequency Adaptive Optimization
 
 
 ## Setup
@@ -32,21 +9,21 @@ The used datasets, MipNeRF360 and Tank & Temple, are hosted by the paper authors
 
 For installation:
 ```
-git clone --recursive https://github.com/VITA-Group/LightGaussian.git
-cd LightGaussian
-# if you have already cloned LightGaussian:
+git clone --recursive https://github.com/junhee98/Gaussian_Lightning.git
+cd Gaussian_Lightning
+# if you have already cloned Gaussian_Lightning:
 # git submodule update --init --recursive
 ```
 ```shell
 conda env create --file environment.yml
-conda activate lightgaussian
+conda activate gaussianlightning
 ```
 note: we modified the "diff-gaussian-rasterization" in the submodule to get the Global Significant Score.
 
 
 ## Compress to Compact Representation
 
-Lightgaussian includes **3 ways** to make the 3D Gaussians be compact
+Our code includes **3 ways** to make the 3D Gaussians be compact
 <!-- #### Option 0 Run all (currently Prune + SH distillation) -->
 
 
@@ -75,6 +52,13 @@ Users can quantize a pruned and distilled 3D-GS checkpoint using the following c
 bash scripts/run_vectree_quantize.sh
 ```
 
+#### Option 4 Overall pipline
+Users can also train all pipline using the following command
+```
+bash runnning_codes.sh
+```
+
+
 
 ## Render
 Render with trajectory. By default ellipse, you can change it to spiral or others trajectory by changing to corresponding function.
@@ -86,36 +70,7 @@ For render after the Vectree Quantization stage, you could render them through
 python render_video.py --load_vq
 ```
 
-
-## Example
-An example ckpt for room scene can be downloaded [here](<https://drive.google.com/drive/folders/1yJeVLQUjYR4cnROOCYuL3o4bXi9atrYH?usp=sharing>), which mainly includes the following several parts:
-
-- point_cloud.ply ——  Pruned, distilled and quantized 3D-GS checkpoint.
-- extreme_saving —— Relevant files obtained after vectree quantization.
-- imp_score.npz —— Global significance used in vectree quantization.
-
-
-
-## TODO List
-- [x] Upload module 1: Prune & recovery 
-- [x] Upload module 2: SH distillation
-- [x] Upload module 3: Vectree Quantization
-- [ ] Upload docker image 
-
-## Acknowledgements
-We would like to express our gratitude to [Yueyu Hu](https://huzi96.github.io/) from NYU for the invaluable discussion on our project.
-
-
-## BibTeX
-If you find our work useful for your project, please consider citing the following paper.
-
-
+For check rendering speed
 ```
-@misc{fan2023lightgaussian, 
-title={LightGaussian: Unbounded 3D Gaussian Compression with 15x Reduction and 200+ FPS}, 
-author={Zhiwen Fan and Kevin Wang and Kairun Wen and Zehao Zhu and Dejia Xu and Zhangyang Wang}, 
-year={2023},
-eprint={2311.17245},
-archivePrefix={arXiv},
-primaryClass={cs.CV} }
+python render_speed.py --source_path PATH/TO/DATASET --model_path PATH/TO/MODEL --skip_train --load_vq
 ```

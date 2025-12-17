@@ -22,9 +22,6 @@ declare -a run_args=(
     "room"
     # "stump"
     # "treehill"
-
-    # "train"
-    # "truck"
   )
 
 
@@ -62,11 +59,11 @@ for arg in "${run_args[@]}"; do
         gpu_id=$(get_available_gpu)
         gpu_id=1
         if [[ -n $gpu_id ]]; then
-          echo "GPU $gpu_id is available. Starting prune_finetune_new.py with dataset '$arg', prune_percent '$prune_percent', prune_type '$prune_type', prune_decay '$prune_decay', and v_pow '$vp' on port $port"
+          echo "GPU $gpu_id is available. Starting prune_finetune.py with dataset '$arg', prune_percent '$prune_percent', prune_type '$prune_type', prune_decay '$prune_decay', and v_pow '$vp' on port $port"
           
           CUDA_VISIBLE_DEVICES=$gpu_id python prune_finetune.py \
             -s "/root/dev/junhee/ai_framework/datasets/mip_nerf_360/$arg" \
-            -m "/root/dev/junhee/ai_framework/LightGaussian/output/${arg}_ours_new_test/pruned" \
+            -m "/root/dev/junhee/ai_framework/Gaussian_Lightning/output/${arg}_ours_final_version/pruned" \
             --eval \
             --port $port \
             --start_checkpoint "/root/dev/junhee/ai_framework/gaussian-splatting/output/$arg/chkpnt30000.pth" \
@@ -75,12 +72,9 @@ for arg in "${run_args[@]}"; do
             --prune_type $prune_type \
             --prune_decay $prune_decay \
             --position_lr_max_steps 35000 \
-            --v_pow $vp #> "logs_ours_new/${arg}_pruned.log" 2>&1
+            --v_pow $vp
 
-          # Increment the port number for the next run
           ((port++))
-          # Allow some time for the process to initialize and potentially use GPU memory
-          # sleep 60
           break
         else
           echo "No GPU available at the moment. Retrying in 1 minute."

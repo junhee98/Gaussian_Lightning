@@ -1,4 +1,4 @@
-name: lightgaussian
+name: gaussianlightning
 channels:
   - pytorch
   - conda-forge
